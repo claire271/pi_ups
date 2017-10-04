@@ -4,9 +4,15 @@ import wiringpi
 import os
 import sys
 import time
+import math
 
-sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from gambezi_python import Gambezi
+
+# Load config
+filename = os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.py")
+exec(compile(open(filename, "rb").read(), filename, 'exec'))
+
+print(GAMBEZI_SERVER_URL)
 
 # Algorithm from https://www.3dbrew.org/wiki/CRC-8-CCITT
 CRC_TABLE = [
@@ -65,29 +71,30 @@ def cobs_unstuff(data, length):
 
 # Setup gambezi
 print("Setting up Gambezi")
-gambezi = Gambezi("localhost:7709", True)
+gambezi = Gambezi(GAMBEZI_SERVER_URL, True)
 gambezi.set_refresh_rate(100)
-gambezi.register_key(['camera', 'light', 'red']).update_subscription(1)
-gambezi.register_key(['camera', 'light', 'green']).update_subscription(1)
-gambezi.register_key(['camera', 'light', 'blue']).update_subscription(1)
-gambezi.register_key(['camera', 'voltage', 'battery'])
-gambezi.register_key(['camera', 'voltage', 'external'])
-gambezi.register_key(['camera', 'voltage', '5 volt'])
+
+node_red = gambezi.register_key(GAMBEZI_KEY + ['light', 'red'])
+node_green = gambezi.register_key(GAMBEZI_KEY + ['light', 'green'])
+node_blue = gambezi.register_key(GAMBEZI_KEY + ['light', 'blue'])
+node_red.update_subscription(1)
+node_green.update_subscription(1)
+node_blue.update_subscription(1)
+
+node_battery = gambezi.register_key(GAMBEZI_KEY + ['voltage', 'battery'])
+node_external = gambezi.register_key(GAMBEZI_KEY + ['voltage', 'external'])
+node_5volt = gambezi.register_key(GAMBEZI_KEY + ['voltage', '5 volt'])
+
+node_current_out = gambezi.register_key(GAMBEZI_KEY + ['current', 'out'])
+node_current_charge = gambezi.register_key(GAMBEZI_KEY + ['current', 'charge'])
+
+node_state_power = gambezi.register_key(GAMBEZI_KEY + ['state', 'power'])
+node_state_charge = gambezi.register_key(GAMBEZI_KEY + ['state', 'charge'])
 
 # Setup I2C
 print("Setting up I2C")
 I2C = wiringpi.I2C()
-fd = I2C.setupInterface('/dev/i2c-1', 0x6A)
-
-# Setup input buffer
-in_length = 8
-in_buffer = [0] * in_length
-in_index = 0
-
-# Setup output buffer
-out_length = 4
-out_buffer = [0] * out_length
-out_index = 0
+fd = I2C.setupInterface(I2C_FILE, I2C_ADDRESS)
 
 # Buffers
 rx_length = 257
@@ -101,10 +108,11 @@ tx_buf = [0] * tx_length
 in_data = []
 out_data = []
 
-out_data = [1, 2, 3, 4, 5]
+old_power_state = 0
 
 try:
     print("Running main loop")
+
     while True:
         # Receive
         rx_buf[rx_index] = I2C.read(fd)
@@ -112,8 +120,9 @@ try:
             if cobs_unstuff(rx_buf, rx_index):
                 if crc8ccitt(rx_buf[1:], rx_index-1) == 0x00:
                     in_data = rx_buf[1: rx_index-1]
+
                     # Do something with the in data
-                    if len(in_data) == 8:
+                    if len(in_data) == 12:
                         # Process Pakcet
                         volt5_voltage = in_data[0] | (in_data[1] << 8)
                         volt5_voltage = volt5_voltage / 1023.0 * 16 * 1.1
@@ -121,18 +130,28 @@ try:
                         external_voltage = external_voltage / 1023.0 * 16 * 1.1
                         battery_voltage = in_data[4] | (in_data[5] << 8)
                         battery_voltage = battery_voltage / 1023.0 * 16 * 1.1
-                        power_state = in_data[6]
-                        charging_state = in_data[7]
-
-                        print(external_voltage)
+                        out_current = in_data[6] | (in_data[7] << 8)
+                        out_current = out_current / 1023.0 * 1.1 / 2740 / 0.004 / 0.025
+                        charge_current = in_data[8] | (in_data[9] << 8)
+                        charge_current = charge_current / 1023.0 * 1.1 / 2740 / 0.004 / 0.100
+                        power_state = in_data[10]
+                        charge_state = in_data[11]
 
                         # Send data
-                        gambezi.register_key(['pi_backup', 'voltage', 'battery']).set_float(battery_voltage)
-                        gambezi.register_key(['pi_backup', 'voltage', 'external']).set_float(external_voltage)
-                        gambezi.register_key(['pi_backup', 'voltage', '5 volt']).set_float(volt5_voltage)
-                        gambezi.register_key(['pi_backup', 'state', 'power']).set_float(power_state)
-                        gambezi.register_key(['pi_backup', 'state', 'charging']).set_float(charging_state)
+                        node_battery.set_float(battery_voltage)
+                        node_external.set_float(external_voltage)
+                        node_5volt.set_float(volt5_voltage)
+                        node_current_out.set_float(out_current)
+                        node_current_charge.set_float(charge_current)
+                        node_state_power.set_float(power_state)
+                        node_state_charge.set_float(charge_state)
+
+                        # Handle shutdown
+                        if power_state == 2 and old_power_state == 1:
+                            os.system("poweroff")
+                        old_power_state = power_state
                     # End doing stuff with the in data
+
             rx_index = 0
         else:
             rx_index += 1
@@ -149,16 +168,19 @@ try:
             tx_buf[len(out_data)+2] = 0
             tx_size = len(out_data)+3
             tx_index = 0
+
             # Write something to out data
-            red_state = gambezi.register_key(['camera', 'light', 'red']).get_boolean()
-            green_state = gambezi.register_key(['camera', 'light', 'green']).get_boolean()
-            blue_state = gambezi.register_key(['camera', 'light', 'blue']).get_boolean()
             out_data = [0] * 3
-            out_data[0] = 0x01 if red_state else 0x00
-            out_data[1] = 0x01 if green_state else 0x00
-            out_data[2] = 0x01 if blue_state else 0x00
+            red_value = node_red.get_float()
+            green_value = node_green.get_float()
+            blue_value = node_blue.get_float()
+            out_data[0] = max(0, min(255, round(0 if math.isnan(red_value) else red_value)))
+            out_data[1] = max(0, min(255, round(0 if math.isnan(green_value) else green_value)))
+            out_data[2] = max(0, min(255, round(0 if math.isnan(blue_value) else blue_value)))
             # End write something to out data
 
-        time.sleep(.01)
+        time.sleep(.002)
+except BaseException as error:
+    print(error)
 finally:
     print("Exited")
