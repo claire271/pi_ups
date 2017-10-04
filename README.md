@@ -1,8 +1,6 @@
-# Gambezi for the Raspberry Pi
+# PI UPS communication script
 
-An installation script for installing the communcation program for the PI UPS and its dependencies to the Raspberry Pi.
-
-# Steps
+# Installation steps
 
 1. While logged into the Pi (either over SSH or directly)
    1. `wget https://github.com/tigerh/pi_ups/archive/master.zip`
