@@ -16,7 +16,7 @@ rm master.zip
 mv gambezi_python-master gambezi_python
 
 # Install packages
-sudo apt-get install python3-pip
+sudo apt-get install -y python3-pip
 sudo pip3 install wiringpi websocket-client
 
 # Enable I2C
